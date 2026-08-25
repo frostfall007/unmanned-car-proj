@@ -1,0 +1,15 @@
+# Keil build output and per-user settings
+**/OBJ/
+**/Listings/
+**/*.axf
+**/*.hex
+**/*.o
+**/*.d
+**/*.crf
+**/*.dep
+**/*.build_log.htm
+**/*.uvguix.*
+**/*.uvoptx
+
+# Local PDF review output
+tmp/
