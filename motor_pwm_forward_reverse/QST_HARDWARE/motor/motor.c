@@ -27,11 +27,25 @@ static void motor_set_duty(u8 duty_percent)
     TIM_SetCompare2(TIM4, compare);  /* PB7, left motor */
 }
 
+static void motor_set_pwm_mode(u16 mode)
+{
+    TIM_OCInitTypeDef pwm;
+
+    TIM_OCStructInit(&pwm);
+    pwm.TIM_OCMode = mode;
+    pwm.TIM_OutputState = TIM_OutputState_Enable;
+    pwm.TIM_Pulse = 0U;
+    pwm.TIM_OCPolarity = TIM_OCPolarity_High;
+    TIM_OC1Init(TIM4, &pwm);
+    TIM_OC2Init(TIM4, &pwm);
+    TIM_OC1PreloadConfig(TIM4, TIM_OCPreload_Enable);
+    TIM_OC2PreloadConfig(TIM4, TIM_OCPreload_Enable);
+}
+
 void motor_init(void)
 {
     GPIO_InitTypeDef gpio;
     TIM_TimeBaseInitTypeDef timer;
-    TIM_OCInitTypeDef pwm;
 
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM4, ENABLE);
@@ -54,15 +68,7 @@ void motor_init(void)
     timer.TIM_RepetitionCounter = 0U;
     TIM_TimeBaseInit(TIM4, &timer);
 
-    TIM_OCStructInit(&pwm);
-    pwm.TIM_OCMode = TIM_OCMode_PWM1;
-    pwm.TIM_OutputState = TIM_OutputState_Enable;
-    pwm.TIM_Pulse = 0U;
-    pwm.TIM_OCPolarity = TIM_OCPolarity_High;
-    TIM_OC1Init(TIM4, &pwm);
-    TIM_OC2Init(TIM4, &pwm);
-    TIM_OC1PreloadConfig(TIM4, TIM_OCPreload_Enable);
-    TIM_OC2PreloadConfig(TIM4, TIM_OCPreload_Enable);
+    motor_set_pwm_mode(TIM_OCMode_PWM1);
     TIM_ARRPreloadConfig(TIM4, ENABLE);
     TIM_Cmd(TIM4, ENABLE);
 
@@ -71,14 +77,20 @@ void motor_init(void)
 
 void motor_forward(u8 duty_percent)
 {
-    /* Positive PWM direction matches the reference project's Set_Pwm(). */
+    /* IA is PWM and IB is low: the L9110 drives the motor forward. */
+    motor_set_duty(0U);
     GPIO_ResetBits(GPIOB, LEFT_DIRECTION_PIN | RIGHT_DIRECTION_PIN);
+    motor_set_pwm_mode(TIM_OCMode_PWM1);
     motor_set_duty(duty_percent);
 }
 
 void motor_reverse(u8 duty_percent)
 {
+    /* IA is PWM2 (low for the requested duty) and IB is high. This makes
+     * reverse torque equal to duty_percent instead of 100 - duty_percent. */
+    motor_set_duty(0U);
     GPIO_SetBits(GPIOB, LEFT_DIRECTION_PIN | RIGHT_DIRECTION_PIN);
+    motor_set_pwm_mode(TIM_OCMode_PWM2);
     motor_set_duty(duty_percent);
 }
 

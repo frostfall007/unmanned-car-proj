@@ -17,7 +17,7 @@ int main(void)
     JTAG_Set(SWD_ENABLE);       /* Retain SWD programming and debugging. */
     motor_init();
 
-    printf("Motor PWM: forward 2 s, reverse 2 s\r\n");
+    printf("Motor PWM control started\r\n");
     while (1)
     {
         printf("Forward\r\n");
