@@ -1,0 +1,17 @@
+static_library("Sum_Experiment_First") {
+    sources = [
+        "Sum_Experiment_First.c",
+        "../7.0_I2c_Ssd1306/src/hal_bsp_ssd1306.c",
+        "../8.0_Sht20/src/hal_bsp_sht20.c",
+        "../9.1_Ap3216c_Stair_Light/src/hal_bsp_ap3216c.c",
+    ]
+
+    include_dirs = [
+        "//utils/native/lite/include",
+        "//kernel/liteos_m/components/cmsis/2.0",
+        "//base/iot_hardware/interfaces/kits/wifiiot_lite",
+        "../7.0_I2c_Ssd1306/include",
+        "../8.0_Sht20/include",
+        "../9.1_Ap3216c_Stair_Light/include",
+    ]
+}
