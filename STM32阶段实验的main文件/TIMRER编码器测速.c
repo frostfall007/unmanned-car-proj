@@ -1,8 +1,6 @@
 #include "stm32f10x.h"
 #include "sys.h"
 #include "encoder.h"
-#include "motor.h"
-#include "control_system.h"
 
 int main(void)
 {
@@ -14,7 +12,6 @@ int main(void)
 
     Encoder_Init_TIM2();                  // =====初始化编码器
     Encoder_Init_TIM3();                  // =====初始化编码器
-    PWM_Init(7199, 9);                    // =====定时器初始化 频率1000
     colorful_led_Init();                  // =====炫彩灯初始化
 
     SysTick_Config(72000000/1000);        // 滴答定时器，每1ms触发一次中断
@@ -24,6 +21,6 @@ int main(void)
     /**主要程序**/
     while(1)
     {
-        System_Control();
+        delay_ms(100);
     }
 }

@@ -1,173 +1,509 @@
 #include "colorful_led.h"
 
-/*
- * Board connections, verified from the vehicle schematic:
- *   PC13 -> FR-WS2812 (six front LEDs)
- *   PC14 -> BA-WS2812 (six rear LEDs)
- * WS2812 transfers color data in GRB order.
- */
-#define FRONT_LED_PIN GPIO_Pin_13
-#define REAR_LED_PIN  GPIO_Pin_14
-#define FRONT_DATA    PCout(13)
-#define REAR_DATA     PCout(14)
-
-static u8 front_data[WS2812_LED_COUNT * 3U];
-static u8 rear_data[WS2812_LED_COUNT * 3U];
-
-/* These macros and the bit-band GPIO writes are retained from the reference
- * project.  Their instruction count is the WS2812 timing source at 72 MHz. */
-#define WAIT_10_NOPS  { __NOP(); __NOP(); __NOP(); __NOP(); __NOP(); \
-                        __NOP(); __NOP(); __NOP(); __NOP(); __NOP(); }
-#define WAIT_250_NS   { __NOP(); __NOP(); __NOP(); __NOP(); __NOP(); \
-                        __NOP(); __NOP(); __NOP(); __NOP(); __NOP(); }
-#define WAIT_400_NS   { WAIT_250_NS; WAIT_10_NOPS; }
-#define WAIT_850_NS   { WAIT_250_NS; WAIT_10_NOPS; WAIT_10_NOPS; \
-                        WAIT_10_NOPS; WAIT_10_NOPS; __NOP(); __NOP(); \
-                        __NOP(); __NOP(); __NOP(); }
-
-static void front_send_zero(void)
-{
-    FRONT_DATA = 1U;
-    WAIT_400_NS;
-    FRONT_DATA = 0U;
-    WAIT_850_NS;
-}
-
-static void front_send_one(void)
-{
-    FRONT_DATA = 1U;
-    WAIT_850_NS;
-    FRONT_DATA = 0U;
-    WAIT_400_NS;
-}
-
-static void rear_send_zero(void)
-{
-    REAR_DATA = 1U;
-    WAIT_400_NS;
-    REAR_DATA = 0U;
-    WAIT_850_NS;
-}
-
-static void rear_send_one(void)
-{
-    REAR_DATA = 1U;
-    WAIT_850_NS;
-    REAR_DATA = 0U;
-    WAIT_400_NS;
-}
-
-static void front_refresh(void)
-{
-    u8 index;
-
-    for (index = 0U; index < (WS2812_LED_COUNT * 3U); ++index)
-    {
-        if ((front_data[index] & 0x80U) == 0U) front_send_zero(); else front_send_one();
-        if ((front_data[index] & 0x40U) == 0U) front_send_zero(); else front_send_one();
-        if ((front_data[index] & 0x20U) == 0U) front_send_zero(); else front_send_one();
-        if ((front_data[index] & 0x10U) == 0U) front_send_zero(); else front_send_one();
-        if ((front_data[index] & 0x08U) == 0U) front_send_zero(); else front_send_one();
-        if ((front_data[index] & 0x04U) == 0U) front_send_zero(); else front_send_one();
-        if ((front_data[index] & 0x02U) == 0U) front_send_zero(); else front_send_one();
-        if ((front_data[index] & 0x01U) == 0U) front_send_zero(); else front_send_one();
-    }
-    FRONT_DATA = 0U;
-    delay_us(80U);
-}
-
-static void rear_refresh(void)
-{
-    u8 index;
-
-    for (index = 0U; index < (WS2812_LED_COUNT * 3U); ++index)
-    {
-        if ((rear_data[index] & 0x80U) == 0U) rear_send_zero(); else rear_send_one();
-        if ((rear_data[index] & 0x40U) == 0U) rear_send_zero(); else rear_send_one();
-        if ((rear_data[index] & 0x20U) == 0U) rear_send_zero(); else rear_send_one();
-        if ((rear_data[index] & 0x10U) == 0U) rear_send_zero(); else rear_send_one();
-        if ((rear_data[index] & 0x08U) == 0U) rear_send_zero(); else rear_send_one();
-        if ((rear_data[index] & 0x04U) == 0U) rear_send_zero(); else rear_send_one();
-        if ((rear_data[index] & 0x02U) == 0U) rear_send_zero(); else rear_send_one();
-        if ((rear_data[index] & 0x01U) == 0U) rear_send_zero(); else rear_send_one();
-    }
-    REAR_DATA = 0U;
-    delay_us(80U);
-}
-
-static void ws2812_set_pixel(u8 *data, u8 led_index, u8 red, u8 green, u8 blue)
-{
-    u8 offset = led_index * 3U;
-
-    data[offset] = green;
-    data[offset + 1U] = red;
-    data[offset + 2U] = blue;
-}
-
-static void ws2812_clear(u8 *data)
-{
-    u8 index;
-
-    for (index = 0U; index < (WS2812_LED_COUNT * 3U); ++index)
-    {
-        data[index] = 0U;
-    }
-}
-
+u8 L_ws_data[ws_num];
+u8 R_ws_data[ws_num];
+/* Initialize the RGB LED interface. */
 void colorful_led_Init(void)
 {
-    GPIO_InitTypeDef gpio;
-
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOC, ENABLE);
-    gpio.GPIO_Pin = FRONT_LED_PIN | REAR_LED_PIN;
-    gpio.GPIO_Mode = GPIO_Mode_Out_PP;
-    gpio.GPIO_Speed = GPIO_Speed_50MHz;
-    GPIO_Init(GPIOC, &gpio);
-
-    colorful_led_off();
+  GPIO_InitTypeDef GPIO_InitStructure;
+  RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOC, ENABLE); // Enable GPIOC clock.
+  GPIO_InitStructure.GPIO_Pin = GPIO_Pin_13|GPIO_Pin_14; // Select LED pins.
+  GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;      // Use push-pull output.
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;     // Set output speed to 50 MHz.
+  GPIO_Init(GPIOC, &GPIO_InitStructure);                // Apply the GPIO settings.
+	
 }
 
-void colorful_led_off(void)
+void L_send_0(void)
 {
-    ws2812_clear(front_data);
-    ws2812_clear(rear_data);
-    front_refresh();
-    rear_refresh();
+    DIL=1;
+    Wait400ns;
+    DIL=0;
+    Wait850ns;
+}
+void L_send_1(void)
+{
+    DIL=1;
+    Wait850ns;
+    DIL=0;
+    Wait400ns;
 }
 
-void colorful_led_running_step(void)
+void R_send_0(void)
 {
-    static u8 led_index = 0U;
-    static u8 moving_forward = 1U;
+    DIR=1;
+    Wait400ns;
+    DIR=0;
+    Wait850ns;
+}
 
-    ws2812_clear(front_data);
-    ws2812_clear(rear_data);
+void R_send_1(void)
+{
+    DIR=1;
+    Wait850ns;
+    DIR=0;
+    Wait400ns;
+}
 
-    /* White point moves over the front and rear LED chains together. */
-    ws2812_set_pixel(front_data, led_index, 48U, 48U, 48U);
-    ws2812_set_pixel(rear_data, led_index, 48U, 48U, 48U);
-    front_refresh();
-    rear_refresh();
+void L_ws2812_reset(void)
+{
+	DIL=0;
+	delay_us(66);
+}
 
-    if (moving_forward != 0U)
+void R_ws2812_reset(void)
+{
+	DIR=0;
+	delay_us(66);
+}
+
+void L_ws2812_rgb(u8 L_ws_num,u8 ws_r,u8 ws_g,u8 ws_b)    // Store a front LED color.
+{
+    L_ws_data[(L_ws_num-1)*3]=ws_g;
+    L_ws_data[(L_ws_num-1)*3+1]=ws_r;
+    L_ws_data[(L_ws_num-1)*3+2]=ws_b;
+}
+
+void L_ws2812_refresh(u8 ws_count)          // Send front LED data.
+{
+    u8 L_ws_ri=0;
+    
+    for(;L_ws_ri<ws_count*3;L_ws_ri++)
     {
-        if (led_index == (WS2812_LED_COUNT - 1U))
+        if((L_ws_data[L_ws_ri]&0x80)==0) L_send_0(); else L_send_1();
+        if((L_ws_data[L_ws_ri]&0x40)==0) L_send_0(); else L_send_1();
+        if((L_ws_data[L_ws_ri]&0x20)==0) L_send_0(); else L_send_1();
+        if((L_ws_data[L_ws_ri]&0x10)==0) L_send_0(); else L_send_1();
+        if((L_ws_data[L_ws_ri]&0x08)==0) L_send_0(); else L_send_1();
+        if((L_ws_data[L_ws_ri]&0x04)==0) L_send_0(); else L_send_1();
+        if((L_ws_data[L_ws_ri]&0x02)==0) L_send_0(); else L_send_1();
+        if((L_ws_data[L_ws_ri]&0x01)==0) L_send_0(); else L_send_1();
+    }
+    
+    // Send the reset signal.
+    L_ws2812_reset();
+}
+
+void R_ws2812_rgb(u8 R_ws_num,u8 ws_r,u8 ws_g,u8 ws_b)     // Store a rear LED color.
+{
+    R_ws_data[(R_ws_num-1)*3]=ws_g;
+    R_ws_data[(R_ws_num-1)*3+1]=ws_r;
+    R_ws_data[(R_ws_num-1)*3+2]=ws_b;
+}
+
+void R_ws2812_refresh(u8 ws_count)            // Send rear LED data.
+{
+    u8 R_ws_ri=0;
+    
+    for(;R_ws_ri<ws_count*3;R_ws_ri++)
+    {
+        if((R_ws_data[R_ws_ri]&0x80)==0) R_send_0(); else R_send_1();
+        if((R_ws_data[R_ws_ri]&0x40)==0) R_send_0(); else R_send_1();
+        if((R_ws_data[R_ws_ri]&0x20)==0) R_send_0(); else R_send_1();
+        if((R_ws_data[R_ws_ri]&0x10)==0) R_send_0(); else R_send_1();
+        if((R_ws_data[R_ws_ri]&0x08)==0) R_send_0(); else R_send_1();
+        if((R_ws_data[R_ws_ri]&0x04)==0) R_send_0(); else R_send_1();
+        if((R_ws_data[R_ws_ri]&0x02)==0) R_send_0(); else R_send_1();
+        if((R_ws_data[R_ws_ri]&0x01)==0) R_send_0(); else R_send_1();
+    }
+    
+    // Send the reset signal.
+    R_ws2812_reset();
+}
+/* Front LED color cycle. */
+void L_led_mode(void)
+{
+	u8 times;
+	 while(1) 
+    {  
+        times++; 
+
+        if(times > 17)
+            times = 0;
+        
+        switch(times)
         {
-            moving_forward = 0U;
+            case 0:
+                L_ws2812_rgb(1, WS_RED);
+                L_ws2812_rgb(2, WS_GREEN);
+                L_ws2812_rgb(3, WS_BLUE);
+                L_ws2812_rgb(4, WS_WHITE);
+                L_ws2812_rgb(5, WS_PURPLE);
+                L_ws2812_rgb(6, WS_YELLOW);
+                L_ws2812_rgb(7, WS_BROWN);
+                L_ws2812_rgb(8, WS_BLUE);
+                L_ws2812_refresh(led_num);
+                break;
+            case 1:
+                L_ws2812_rgb(1, AliceBlue);
+                L_ws2812_rgb(2, AntiqueWhite);
+                L_ws2812_rgb(3, Aqua);
+                L_ws2812_rgb(4, Aquamarine);
+                L_ws2812_rgb(5, Azure);
+                L_ws2812_rgb(6, Beige);
+                L_ws2812_rgb(7, Bisque);
+                L_ws2812_rgb(8, BlanchedAlmond);
+                L_ws2812_refresh(led_num);
+                break;
+            case 2:
+                L_ws2812_rgb(1, Blue);
+                L_ws2812_rgb(2, BlueViolet);
+                L_ws2812_rgb(3, Brown);
+                L_ws2812_rgb(4, BurlyWood);
+                L_ws2812_rgb(5, CadetBlue);
+                L_ws2812_rgb(6, Chartreuse);
+                L_ws2812_rgb(7, Chocolate);
+                L_ws2812_rgb(8, Coral);
+                L_ws2812_refresh(led_num);
+                break;
+            case 3:
+                L_ws2812_rgb(1, CornflowerBlue);
+                L_ws2812_rgb(2, Cornsilk);
+                L_ws2812_rgb(3, Crimson);
+                L_ws2812_rgb(4, Cyan);
+                L_ws2812_rgb(5, DarkBlue);
+                L_ws2812_rgb(6, DarkCyan);
+                L_ws2812_rgb(7, DarkGoldenRod);
+                L_ws2812_rgb(8, DarkGray);
+                L_ws2812_refresh(led_num);
+                break;
+            case 4:
+                L_ws2812_rgb(1, DarkGreen);
+                L_ws2812_rgb(2, DarkKhaki);
+                L_ws2812_rgb(3, DarkMagenta);
+                L_ws2812_rgb(4, DarkOliveGreen);
+                L_ws2812_rgb(5, DarkOrange);
+                L_ws2812_rgb(6, DarkOrchid);
+                L_ws2812_rgb(7, DarkRed);
+                L_ws2812_rgb(8, DarkSalmon);
+                L_ws2812_refresh(led_num);
+                break;
+            case 5:
+                L_ws2812_rgb(1, DarkSeaGreen);
+                L_ws2812_rgb(2, DarkSlateBlue);
+                L_ws2812_rgb(3, DarkSlateGray);
+                L_ws2812_rgb(4, DarkTurquoise);
+                L_ws2812_rgb(5, DarkViolet);
+                L_ws2812_rgb(6, DeepPink);
+                L_ws2812_rgb(7, DeepSkyBlue);
+                L_ws2812_rgb(8, DimGray);
+                L_ws2812_refresh(led_num);
+                break;
+            case 6:
+                L_ws2812_rgb(1, DodgerBlue);
+                L_ws2812_rgb(2, FireBrick);
+                L_ws2812_rgb(3, FloralWhite);
+                L_ws2812_rgb(4, ForestGreen);
+                L_ws2812_rgb(5, Fuchsia);
+                L_ws2812_rgb(6, Gainsboro);
+                L_ws2812_rgb(7, GhostWhite);
+                L_ws2812_rgb(8, Gold);
+                L_ws2812_refresh(led_num);
+                break;
+            case 7:
+                L_ws2812_rgb(1, GoldenRod);
+                L_ws2812_rgb(2, Gray);
+                L_ws2812_rgb(3, Green);
+                L_ws2812_rgb(4, GreenYellow);
+                L_ws2812_rgb(5, HoneyDew);
+                L_ws2812_rgb(6, HotPink);
+                L_ws2812_rgb(7, IndianRed);
+                L_ws2812_rgb(8, Indigo);
+                L_ws2812_refresh(led_num);
+                break;
+         case 8:
+                L_ws2812_rgb(1, Ivory);
+                L_ws2812_rgb(2, Khaki);
+                L_ws2812_rgb(3, Lavender);
+                L_ws2812_rgb(4, LavenderBlush);
+                L_ws2812_rgb(5, LawnGreen);
+                L_ws2812_rgb(6, LemonChiffon);
+                L_ws2812_rgb(7, LightBlue);
+                L_ws2812_rgb(8, LightCoral);
+                L_ws2812_refresh(led_num);
+                break;
+				case 9:
+                L_ws2812_rgb(1, LightCyan);
+                L_ws2812_rgb(2, LightGoldenRodYellow);
+                L_ws2812_rgb(3, LightGray);
+                L_ws2812_rgb(4, LightGreen);
+                L_ws2812_rgb(5, LightPink);
+                L_ws2812_rgb(6, LightSalmon);
+                L_ws2812_rgb(7, LightSeaGreen);
+                L_ws2812_rgb(8, LightSkyBlue);
+                L_ws2812_refresh(led_num);
+                break;
+				case 10:
+                L_ws2812_rgb(1, LightSlateGray);
+                L_ws2812_rgb(2, LightSteelBlue);
+                L_ws2812_rgb(3, LightYellow);
+                L_ws2812_rgb(4, Lime);
+                L_ws2812_rgb(5, LimeGreen);
+                L_ws2812_rgb(6, Linen);
+                L_ws2812_rgb(7, Magenta);
+                L_ws2812_rgb(8, Maroon);
+                L_ws2812_refresh(led_num);
+                break;
+				case 11:
+                L_ws2812_rgb(1, MediumAquaMarine);
+                L_ws2812_rgb(2, MediumBlue);
+                L_ws2812_rgb(3, MediumOrchid);
+                L_ws2812_rgb(4, MediumPurple);
+                L_ws2812_rgb(5, MediumSeaGreen);
+                L_ws2812_rgb(6, MediumSlateBlue);
+                L_ws2812_rgb(7, MediumSpringGreen);
+                L_ws2812_rgb(8, MediumTurquoise);
+                L_ws2812_refresh(led_num);
+                break;
+				case 12:
+                L_ws2812_rgb(1, MediumVioletRed);
+                L_ws2812_rgb(2, MidnightBlue);
+                L_ws2812_rgb(3, MintCream);
+                L_ws2812_rgb(4, MistyRose);
+                L_ws2812_rgb(5, Moccasin);
+                L_ws2812_rgb(6, NavajoWhite);
+                L_ws2812_rgb(7, Navy);
+                L_ws2812_rgb(8, OldLace);
+                L_ws2812_refresh(led_num);
+                break;
+				case 13:
+                L_ws2812_rgb(1, Olive);
+                L_ws2812_rgb(2, OliveDrab);
+                L_ws2812_rgb(3, Orange);
+                L_ws2812_rgb(4, OrangeRed);
+                L_ws2812_rgb(5, Orchid);
+                L_ws2812_rgb(6, PaleGoldenRod);
+                L_ws2812_rgb(7, PaleGreen);
+                L_ws2812_rgb(8, PaleTurquoise);
+                L_ws2812_refresh(led_num);
+                break;
+				case 14:
+                L_ws2812_rgb(1, PaleVioletRed);
+                L_ws2812_rgb(2, PapayaWhip);
+                L_ws2812_rgb(3, PeachPuff);
+                L_ws2812_rgb(4, Peru);
+                L_ws2812_rgb(5, Pink);
+                L_ws2812_rgb(6, Plum);
+                L_ws2812_rgb(7, PowderBlue);
+                L_ws2812_rgb(8, Purple);
+                L_ws2812_refresh(led_num);
+                break;
+				case 15:
+                L_ws2812_rgb(1, Red);
+                L_ws2812_rgb(2, RosyBrown);
+                L_ws2812_rgb(3, RoyalBlue);
+                L_ws2812_rgb(4, SaddleBrown);
+                L_ws2812_rgb(5, Salmon);
+                L_ws2812_rgb(6, SandyBrown);
+                L_ws2812_rgb(7, SeaGreen);
+                L_ws2812_rgb(8, SeaShell);
+                L_ws2812_refresh(led_num);
+                break;
+				case 16:
+                L_ws2812_rgb(1, Sienna);
+                L_ws2812_rgb(2, Silver);
+                L_ws2812_rgb(3, SkyBlue);
+                L_ws2812_rgb(4, SlateBlue);
+                L_ws2812_rgb(5, SlateGray);
+                L_ws2812_rgb(6, Snow);
+                L_ws2812_rgb(7, SpringGreen);
+                L_ws2812_rgb(8, SteelBlue);
+                L_ws2812_refresh(led_num);
+                break;
+				case 17:
+                L_ws2812_rgb(1, Tan);
+                L_ws2812_rgb(2, Teal);
+                L_ws2812_rgb(3, Thistle);
+                L_ws2812_rgb(4, Tomato);
+                L_ws2812_rgb(5, Turquoise);
+                L_ws2812_rgb(6, Violet);
+                L_ws2812_rgb(7, Wheat);
+                L_ws2812_rgb(8, White);
+                L_ws2812_refresh(led_num);
+                break;	
+        }
+       
+        delay_ms(1000);        
+    }  
+}
+/* Rear LED reverse light. */
+void R_led_mode(void)
+{
+	
+	              R_ws2812_rgb(1, Red);
+                R_ws2812_rgb(2, WhiteSmoke);
+                R_ws2812_rgb(3, WhiteSmoke);
+                R_ws2812_rgb(4, WhiteSmoke);
+                R_ws2812_rgb(5, WhiteSmoke);
+                R_ws2812_rgb(6, Red);
+                R_ws2812_refresh(led_num);
+		           
+}
+/* Turn off the rear LEDs. */
+void R_led_CLC(void)
+{
+	              R_ws2812_rgb(1, WS_DARK);
+                R_ws2812_rgb(2, WS_DARK);
+                R_ws2812_rgb(3, WS_DARK);
+                R_ws2812_rgb(4, WS_DARK);
+                R_ws2812_rgb(5, WS_DARK);
+                R_ws2812_rgb(6, WS_DARK);
+                R_ws2812_refresh(led_num);
+		           
+}
+
+void L_led_forward(void)
+{
+    u8 index;
+
+    for (index = 1; index <= led_num; ++index)
+    {
+        L_ws2812_rgb(index, WS_WHITE);
+    }
+    L_ws2812_refresh(led_num);
+}
+
+void L_led_left_turn(void)
+{
+    u8 index;
+
+    for (index = 1; index <= led_num; ++index)
+    {
+        if (index <= 3)
+        {
+            L_ws2812_rgb(index, WS_YELLOW);
         }
         else
         {
-            ++led_index;
+            L_ws2812_rgb(index, WS_DARK);
         }
     }
-    else if (led_index == 0U)
-    {
-        moving_forward = 1U;
-    }
-    else
-    {
-        --led_index;
-    }
+    L_ws2812_refresh(led_num);
+}
 
-    delay_ms(RUNNING_LIGHT_STEP_MS);
+void L_led_right_turn(void)
+{
+    u8 index;
+
+    for (index = 1; index <= led_num; ++index)
+    {
+        if (index > 3)
+        {
+            L_ws2812_rgb(index, WS_YELLOW);
+        }
+        else
+        {
+            L_ws2812_rgb(index, WS_DARK);
+        }
+    }
+    L_ws2812_refresh(led_num);
+}
+
+void L_led_off(void)
+{
+    u8 index;
+
+    for (index = 1; index <= led_num; ++index)
+    {
+        L_ws2812_rgb(index, WS_DARK);
+    }
+    L_ws2812_refresh(led_num);
+}
+
+/* Front LED running-light effect. */
+void L_runingled(void)    // Run the front LED effect.
+{
+	u8 i;
+	static u8 j = 1;
+
+	for(i=1;i<7;i++)
+	{
+			if(j==1)    // * _ _ _ _ *
+					{	
+						if((i==6||i==1))
+						L_ws2812_rgb(i, GhostWhite);
+					  else
+						L_ws2812_rgb(i, WS_DARK);
+				  }
+			if(j==2)    // * * _ _ * *
+					{	
+					if((i==5||i==2||i==6||i==1))
+						L_ws2812_rgb(i, GhostWhite);
+					else
+						L_ws2812_rgb(i, WS_DARK);
+				  }
+			if(j==3)    // * * * * * *
+					{	
+					if((i==3||i==4||i==5||i==2||i==6||i==1))
+						L_ws2812_rgb(i, GhostWhite);
+					else
+						L_ws2812_rgb(i, WS_DARK);
+				  }
+			if(j==4)    // * * _ _ * *
+					{	
+					if((i==5||i==2||i==6||i==1))
+						L_ws2812_rgb(i, GhostWhite);
+					else
+						L_ws2812_rgb(i, WS_DARK);
+				  }
+			if(j==5)   // * _ _ _ _ *
+					{	
+						if((i==6||i==1))
+						L_ws2812_rgb(i, GhostWhite);
+					  else
+						L_ws2812_rgb(i, WS_DARK);
+				  }
+	}
+
+	L_ws2812_refresh(led_num);  // Update the LEDs.
+	if(++j > 5) j = 1;
+}
+
+/* Rear LED running-light effect. */
+void R_runingled(void)
+{
+	u8 i;
+	static u8 j = 1;
+
+	for(i=1;i<7;i++)
+	{
+			if(j==1)    // * _ _ _ _ *
+					{	
+						if((i==6||i==1))
+						R_ws2812_rgb(i, GhostWhite);
+					  else
+						R_ws2812_rgb(i, WS_DARK);
+				  }
+			if(j==2)    // * * _ _ * *
+					{	
+					if((i==5||i==2||i==6||i==1))
+						R_ws2812_rgb(i, GhostWhite);
+					else
+						R_ws2812_rgb(i, WS_DARK);
+				  }
+			if(j==3)    // * * * * * *
+					{	
+					if((i==3||i==4||i==5||i==2||i==6||i==1))
+						R_ws2812_rgb(i, GhostWhite);
+					else
+						R_ws2812_rgb(i, WS_DARK);
+				  }
+			if(j==4)    // * * _ _ * *
+					{	
+					if((i==5||i==2||i==6||i==1))
+						R_ws2812_rgb(i, GhostWhite);
+					else
+						R_ws2812_rgb(i, WS_DARK);
+				  }
+			if(j==5)   // * _ _ _ _ *
+					{	
+						if((i==6||i==1))
+						R_ws2812_rgb(i, GhostWhite);
+					  else
+						R_ws2812_rgb(i, WS_DARK);
+				  }
+	}
+
+	R_ws2812_refresh(led_num);  // Update the LEDs.
+	if(++j > 5) j = 1;
 }
