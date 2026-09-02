@@ -25,6 +25,12 @@
 #define SCAN_INTERVAL_TICKS 1000U
 #define REPORT_INTERVAL_TICKS 100U
 #define LINE_POLL_TICKS 10U
+#define BLE_HELP_INTERVAL_TICKS 500U
+#define MOTOR_KEEPALIVE_TICKS 20U
+#define MOTOR_COMMAND_TIMEOUT_TICKS 1000U
+#define MOTOR_SPEED_SLOW 50
+#define MOTOR_SPEED_NORMAL 100
+#define MOTOR_SPEED_FAST 150
 
 /* Adjust this level if the tracking module is wired with inverse logic. */
 #define TCRT_LINE_ACTIVE_LEVEL WIFI_IOT_GPIO_VALUE0
@@ -44,6 +50,14 @@ static SensorData g_sensorData;
 static osMutexId_t g_dataMutex;
 static osMutexId_t g_i2cMutex;
 static osMutexId_t g_printMutex;
+static osMutexId_t g_motorMutex;
+static int g_activeLeftMotor;
+static int g_activeRightMotor;
+static uint8_t g_motionActive;
+
+static const char g_bleHelpMessage[] =
+    "READY. COMMANDS: O STOP, W FORWARD, A LEFT, D RIGHT, S REVERSE, "
+    "I SPEED 50, K SPEED 150.\r\n";
 
 static void PrintLine(const char *text)
 {
@@ -70,6 +84,155 @@ static void ConfigureGpio(void)
     IoSetFunc(WIFI_IOT_IO_NAME_GPIO_14, WIFI_IOT_IO_FUNC_GPIO_14_GPIO);
     GpioSetDir(TCRT_LEFT_GPIO, WIFI_IOT_GPIO_DIR_IN);
     GpioSetDir(TCRT_RIGHT_GPIO, WIFI_IOT_GPIO_DIR_IN);
+}
+
+static int InitMotorUart(void)
+{
+    WifiIotUartAttribute uartAttr = {
+        .baudRate = 115200,
+        .dataBits = 8,
+        .stopBits = 1,
+        .parity = 0,
+    };
+    uint32_t result;
+
+    IoSetFunc(WIFI_IOT_IO_NAME_GPIO_11, WIFI_IOT_IO_FUNC_GPIO_11_UART2_TXD);
+    IoSetFunc(WIFI_IOT_IO_NAME_GPIO_12, WIFI_IOT_IO_FUNC_GPIO_12_UART2_RXD);
+    result = UartInit(WIFI_IOT_UART_IDX_2, &uartAttr, NULL);
+    if (result != 0U) {
+        osMutexAcquire(g_printMutex, osWaitForever);
+        printf("MOTOR UART initialization_failed error=0x%08X\r\n", result);
+        osMutexRelease(g_printMutex);
+        return -1;
+    }
+    return 0;
+}
+
+static int RestoreBluetoothUart(void)
+{
+    WifiIotUartAttribute uartAttr = {
+        .baudRate = 9600,
+        .dataBits = 8,
+        .stopBits = 1,
+        .parity = 0,
+    };
+    uint32_t result;
+
+    IoSetFunc(WIFI_IOT_IO_NAME_GPIO_0, WIFI_IOT_IO_FUNC_GPIO_0_UART1_TXD);
+    IoSetFunc(WIFI_IOT_IO_NAME_GPIO_1, WIFI_IOT_IO_FUNC_GPIO_1_UART1_RXD);
+    result = UartInit(WIFI_IOT_UART_IDX_1, &uartAttr, NULL);
+    if (result != 0U) {
+        osMutexAcquire(g_printMutex, osWaitForever);
+        printf("BLE restore_failed error=0x%08X\r\n", result);
+        osMutexRelease(g_printMutex);
+        return -1;
+    }
+    return 0;
+}
+
+static void MotorControl(int leftMotor, int rightMotor)
+{
+    unsigned char frame[6];
+    int motorReady;
+
+    frame[1] = (leftMotor < 0) ? 1U : 0U;
+    frame[3] = (rightMotor < 0) ? 1U : 0U;
+    if (leftMotor < 0) leftMotor = -leftMotor;
+    if (rightMotor < 0) rightMotor = -rightMotor;
+    if (leftMotor > MOTOR_SPEED_FAST) leftMotor = MOTOR_SPEED_FAST;
+    if (rightMotor > MOTOR_SPEED_FAST) rightMotor = MOTOR_SPEED_FAST;
+
+    frame[0] = 0xFCU;
+    frame[2] = (unsigned char)leftMotor;
+    frame[4] = (unsigned char)rightMotor;
+    frame[5] = 0xFDU;
+
+    osMutexAcquire(g_motorMutex, osWaitForever);
+    (void)UartDeinit(WIFI_IOT_UART_IDX_1);
+    motorReady = InitMotorUart();
+    if (motorReady == 0) {
+        UartWrite(WIFI_IOT_UART_IDX_2, frame, sizeof(frame));
+        hi_udelay(1000U);
+    }
+    (void)UartDeinit(WIFI_IOT_UART_IDX_2);
+    (void)RestoreBluetoothUart();
+    osMutexRelease(g_motorMutex);
+}
+
+static void SetMotionCommand(int leftMotor, int rightMotor)
+{
+    g_activeLeftMotor = leftMotor;
+    g_activeRightMotor = rightMotor;
+    g_motionActive = ((leftMotor != 0) || (rightMotor != 0)) ? 1U : 0U;
+    MotorControl(leftMotor, rightMotor);
+}
+
+static void CarStop(void)
+{
+    SetMotionCommand(0, 0);
+}
+
+static const char *HandleBluetoothCommand(unsigned char command)
+{
+    if ((command >= 'a') && (command <= 'z')) {
+        command = (unsigned char)(command - ('a' - 'A'));
+    }
+
+    switch (command) {
+        case 'O':
+            CarStop();
+            return "COMMAND=STOP\r\n";
+        case 'W':
+            SetMotionCommand(MOTOR_SPEED_NORMAL, MOTOR_SPEED_NORMAL);
+            return "COMMAND=FORWARD SPEED=100\r\n";
+        case 'A':
+            SetMotionCommand(50, 150);
+            return "COMMAND=LEFT\r\n";
+        case 'D':
+            SetMotionCommand(150, 50);
+            return "COMMAND=RIGHT\r\n";
+        case 'S':
+            SetMotionCommand(-MOTOR_SPEED_NORMAL, -MOTOR_SPEED_NORMAL);
+            return "COMMAND=REVERSE SPEED=100\r\n";
+        case 'I':
+            SetMotionCommand(MOTOR_SPEED_SLOW, MOTOR_SPEED_SLOW);
+            return "COMMAND=FORWARD SPEED=50\r\n";
+        case 'K':
+            SetMotionCommand(MOTOR_SPEED_FAST, MOTOR_SPEED_FAST);
+            return "COMMAND=FORWARD SPEED=150\r\n";
+        default:
+            CarStop();
+            return "COMMAND=INVALID. STOPPED. USE O W A D S I K.\r\n";
+    }
+}
+
+static void BluetoothSend(const char *text)
+{
+    UartWrite(WIFI_IOT_UART_IDX_1, (unsigned char *)text, strlen(text));
+}
+
+static int InitBluetoothUart(void)
+{
+    WifiIotUartAttribute uartAttr = {
+        .baudRate = 9600,
+        .dataBits = 8,
+        .stopBits = 1,
+        .parity = 0,
+    };
+    uint32_t result;
+
+    GpioInit();
+    IoSetFunc(WIFI_IOT_IO_NAME_GPIO_0, WIFI_IOT_IO_FUNC_GPIO_0_UART1_TXD);
+    IoSetFunc(WIFI_IOT_IO_NAME_GPIO_1, WIFI_IOT_IO_FUNC_GPIO_1_UART1_RXD);
+    result = UartInit(WIFI_IOT_UART_IDX_1, &uartAttr, NULL);
+    if (result != 0U) {
+        osMutexAcquire(g_printMutex, osWaitForever);
+        printf("BLE initialization_failed error=0x%08X\r\n", result);
+        osMutexRelease(g_printMutex);
+        return -1;
+    }
+    PrintLine("BLE UART initialized baud=9600\r\n");
+    return 0;
 }
 
 static void ServoMoveTo(uint8_t angle)
@@ -246,42 +409,60 @@ static void ReportTask(void *argument)
 
 static void BluetoothTask(void *argument)
 {
-    WifiIotUartAttribute uartAttr = {
-        .baudRate = 9600,
-        .dataBits = 8,
-        .stopBits = 1,
-        .parity = 0,
-    };
     unsigned char buffer[128];
-    uint32_t result;
+    uint32_t helpElapsed = 0U;
+    uint32_t keepaliveElapsed = 0U;
+    uint32_t commandElapsed = 0U;
 
     (void)argument;
-    IoSetFunc(WIFI_IOT_IO_NAME_GPIO_0, WIFI_IOT_IO_FUNC_GPIO_0_UART1_TXD);
-    IoSetFunc(WIFI_IOT_IO_NAME_GPIO_1, WIFI_IOT_IO_FUNC_GPIO_1_UART1_RXD);
-    result = UartInit(WIFI_IOT_UART_IDX_1, &uartAttr, NULL);
-    if (result != 0U) {
-        osMutexAcquire(g_printMutex, osWaitForever);
-        printf("BLE initialization_failed error=0x%08X\r\n", result);
-        osMutexRelease(g_printMutex);
-        return;
-    }
-
     PrintLine("BLE ready baud=9600\r\n");
+    BluetoothSend(g_bleHelpMessage);
     while (1) {
         uint32_t received = UartRead(WIFI_IOT_UART_IDX_1, buffer, sizeof(buffer) - 1U);
+        uint32_t index;
 
         if (received == 0U) {
+            ++helpElapsed;
+            if (helpElapsed >= BLE_HELP_INTERVAL_TICKS) {
+                BluetoothSend(g_bleHelpMessage);
+                helpElapsed = 0U;
+            }
+            if (g_motionActive != 0U) {
+                ++keepaliveElapsed;
+                ++commandElapsed;
+                if (commandElapsed >= MOTOR_COMMAND_TIMEOUT_TICKS) {
+                    CarStop();
+                    BluetoothSend("COMMAND=TIMEOUT STOP\r\n");
+                    PrintLine("COMMAND=TIMEOUT STOP\r\n");
+                    keepaliveElapsed = 0U;
+                    commandElapsed = 0U;
+                } else if (keepaliveElapsed >= MOTOR_KEEPALIVE_TICKS) {
+                    MotorControl(g_activeLeftMotor, g_activeRightMotor);
+                    keepaliveElapsed = 0U;
+                }
+            }
             osDelay(1U);
             continue;
         }
+        helpElapsed = 0U;
+        keepaliveElapsed = 0U;
+        commandElapsed = 0U;
         if (received >= sizeof(buffer)) {
             PrintLine("BLE receive_failed invalid_length\r\n");
             continue;
         }
-        buffer[received] = '\0';
-        osMutexAcquire(g_printMutex, osWaitForever);
-        printf("BLE RX: %s\r\n", buffer);
-        osMutexRelease(g_printMutex);
+        for (index = 0U; index < received; ++index) {
+            const char *response;
+
+            if ((buffer[index] == '\r') || (buffer[index] == '\n')) {
+                continue;
+            }
+            response = HandleBluetoothCommand(buffer[index]);
+            BluetoothSend(response);
+            osMutexAcquire(g_printMutex, osWaitForever);
+            printf("BLE RX=%c %s", buffer[index], response);
+            osMutexRelease(g_printMutex);
+        }
     }
 }
 
@@ -325,23 +506,29 @@ static void SumExperimentFirst(void)
     g_dataMutex = osMutexNew(NULL);
     g_i2cMutex = osMutexNew(NULL);
     g_printMutex = osMutexNew(NULL);
-    if ((g_dataMutex == NULL) || (g_i2cMutex == NULL) || (g_printMutex == NULL)) {
+    g_motorMutex = osMutexNew(NULL);
+    if ((g_dataMutex == NULL) || (g_i2cMutex == NULL) || (g_printMutex == NULL) ||
+        (g_motorMutex == NULL)) {
         printf("Mutex creation failed.\r\n");
         return;
     }
 
     ConfigureGpio();
-    if (InitI2cDevices() != 0) {
-        PrintLine("I2C device initialization failed.\r\n");
+    if (InitBluetoothUart() != 0) {
         return;
     }
-
+    CarStop();
     PrintLine("SUM experiment started.\r\n");
     CreateTask("scan", ScanTask, osPriorityNormal);
     CreateTask("line_tracking", LineTrackingTask, osPriorityNormal);
+    CreateTask("bluetooth", BluetoothTask, osPriorityNormal);
+
+    if (InitI2cDevices() != 0) {
+        PrintLine("I2C device initialization failed. BLE control is available.\r\n");
+        return;
+    }
     CreateTask("environment", EnvironmentTask, osPriorityNormal);
     CreateTask("report", ReportTask, osPriorityNormal);
-    CreateTask("bluetooth", BluetoothTask, osPriorityNormal);
 }
 
 APP_FEATURE_INIT(SumExperimentFirst);
