@@ -27,7 +27,6 @@
 #define LINE_POLL_TICKS 10U
 #define BLE_HELP_INTERVAL_TICKS 500U
 #define MOTOR_KEEPALIVE_TICKS 20U
-#define MOTOR_COMMAND_TIMEOUT_TICKS 1000U
 #define MOTOR_SPEED_SLOW 50
 #define MOTOR_SPEED_NORMAL 100
 #define MOTOR_SPEED_FAST 150
@@ -108,32 +107,10 @@ static int InitMotorUart(void)
     return 0;
 }
 
-static int RestoreBluetoothUart(void)
-{
-    WifiIotUartAttribute uartAttr = {
-        .baudRate = 9600,
-        .dataBits = 8,
-        .stopBits = 1,
-        .parity = 0,
-    };
-    uint32_t result;
-
-    IoSetFunc(WIFI_IOT_IO_NAME_GPIO_0, WIFI_IOT_IO_FUNC_GPIO_0_UART1_TXD);
-    IoSetFunc(WIFI_IOT_IO_NAME_GPIO_1, WIFI_IOT_IO_FUNC_GPIO_1_UART1_RXD);
-    result = UartInit(WIFI_IOT_UART_IDX_1, &uartAttr, NULL);
-    if (result != 0U) {
-        osMutexAcquire(g_printMutex, osWaitForever);
-        printf("BLE restore_failed error=0x%08X\r\n", result);
-        osMutexRelease(g_printMutex);
-        return -1;
-    }
-    return 0;
-}
-
-static void MotorControl(int leftMotor, int rightMotor)
+static void MotorControl(int leftMotor, int rightMotor, uint8_t reportResult)
 {
     unsigned char frame[6];
-    int motorReady;
+    int written;
 
     frame[1] = (leftMotor < 0) ? 1U : 0U;
     frame[3] = (rightMotor < 0) ? 1U : 0U;
@@ -148,15 +125,15 @@ static void MotorControl(int leftMotor, int rightMotor)
     frame[5] = 0xFDU;
 
     osMutexAcquire(g_motorMutex, osWaitForever);
-    (void)UartDeinit(WIFI_IOT_UART_IDX_1);
-    motorReady = InitMotorUart();
-    if (motorReady == 0) {
-        UartWrite(WIFI_IOT_UART_IDX_2, frame, sizeof(frame));
-        hi_udelay(1000U);
-    }
-    (void)UartDeinit(WIFI_IOT_UART_IDX_2);
-    (void)RestoreBluetoothUart();
+    written = UartWrite(WIFI_IOT_UART_IDX_2, frame, sizeof(frame));
     osMutexRelease(g_motorMutex);
+
+    if (reportResult != 0U) {
+        osMutexAcquire(g_printMutex, osWaitForever);
+        printf("MOTOR TX=%d LEFT_DIR=%u LEFT_SPEED=%u RIGHT_DIR=%u RIGHT_SPEED=%u\r\n",
+            written, frame[1], frame[2], frame[3], frame[4]);
+        osMutexRelease(g_printMutex);
+    }
 }
 
 static void SetMotionCommand(int leftMotor, int rightMotor)
@@ -164,12 +141,24 @@ static void SetMotionCommand(int leftMotor, int rightMotor)
     g_activeLeftMotor = leftMotor;
     g_activeRightMotor = rightMotor;
     g_motionActive = ((leftMotor != 0) || (rightMotor != 0)) ? 1U : 0U;
-    MotorControl(leftMotor, rightMotor);
+    MotorControl(leftMotor, rightMotor, 1U);
 }
 
 static void CarStop(void)
 {
     SetMotionCommand(0, 0);
+}
+
+static void MotorKeepaliveTask(void *argument)
+{
+    (void)argument;
+    PrintLine("MOTOR keepalive ready interval=200ms\r\n");
+    while (1) {
+        if (g_motionActive != 0U) {
+            MotorControl(g_activeLeftMotor, g_activeRightMotor, 0U);
+        }
+        osDelay(MOTOR_KEEPALIVE_TICKS);
+    }
 }
 
 static const char *HandleBluetoothCommand(unsigned char command)
@@ -411,8 +400,6 @@ static void BluetoothTask(void *argument)
 {
     unsigned char buffer[128];
     uint32_t helpElapsed = 0U;
-    uint32_t keepaliveElapsed = 0U;
-    uint32_t commandElapsed = 0U;
 
     (void)argument;
     PrintLine("BLE ready baud=9600\r\n");
@@ -427,26 +414,10 @@ static void BluetoothTask(void *argument)
                 BluetoothSend(g_bleHelpMessage);
                 helpElapsed = 0U;
             }
-            if (g_motionActive != 0U) {
-                ++keepaliveElapsed;
-                ++commandElapsed;
-                if (commandElapsed >= MOTOR_COMMAND_TIMEOUT_TICKS) {
-                    CarStop();
-                    BluetoothSend("COMMAND=TIMEOUT STOP\r\n");
-                    PrintLine("COMMAND=TIMEOUT STOP\r\n");
-                    keepaliveElapsed = 0U;
-                    commandElapsed = 0U;
-                } else if (keepaliveElapsed >= MOTOR_KEEPALIVE_TICKS) {
-                    MotorControl(g_activeLeftMotor, g_activeRightMotor);
-                    keepaliveElapsed = 0U;
-                }
-            }
             osDelay(1U);
             continue;
         }
         helpElapsed = 0U;
-        keepaliveElapsed = 0U;
-        commandElapsed = 0U;
         if (received >= sizeof(buffer)) {
             PrintLine("BLE receive_failed invalid_length\r\n");
             continue;
@@ -517,11 +488,15 @@ static void SumExperimentFirst(void)
     if (InitBluetoothUart() != 0) {
         return;
     }
+    if (InitMotorUart() != 0) {
+        return;
+    }
     CarStop();
     PrintLine("SUM experiment started.\r\n");
     CreateTask("scan", ScanTask, osPriorityNormal);
     CreateTask("line_tracking", LineTrackingTask, osPriorityNormal);
     CreateTask("bluetooth", BluetoothTask, osPriorityNormal);
+    CreateTask("motor_keepalive", MotorKeepaliveTask, osPriorityNormal);
 
     if (InitI2cDevices() != 0) {
         PrintLine("I2C device initialization failed. BLE control is available.\r\n");
