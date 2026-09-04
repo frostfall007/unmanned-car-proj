@@ -10,29 +10,22 @@
 
 /* --------------------------- Tunable parameters -------------------------- */
 #define LINE_BLACK_LEVEL              WIFI_IOT_GPIO_VALUE1
-#define NORMAL_SPEED                  75
-#define MARKER_SCAN_SPEED             50
-#define BACKTRACK_SPEED               50
-#define BRANCH_TURN_SPEED             65
+#define NORMAL_LEFT_SPEED             58
+#define NORMAL_RIGHT_SPEED            52
+#define LEFT_CORRECTION_INNER_SPEED   30
+#define LEFT_CORRECTION_OUTER_SPEED   60
+#define RIGHT_REVERSE_LEFT_SPEED      25
+#define RIGHT_REVERSE_RIGHT_SPEED     55
+#define RIGHT_FORWARD_LEFT_SPEED      60
+#define RIGHT_FORWARD_RIGHT_SPEED     40
 #define MOTOR_MAX_SPEED               150
 
-#define PID_KP                        35.0f
-#define PID_KI                        0.20f
-#define PID_KD                        22.0f
-#define PID_INTEGRAL_LIMIT            20.0f
-
-#define END_GAP_MIN_MS                100UL
-#define END_GAP_MAX_MS                1000UL
-#define END_BAR_CONFIRM_SAMPLES       3U
-#define DEAD_END_STOP_MS              200UL
-#define BACKTRACK_IGNORE_MS           500UL
-#define BACKTRACK_TIMEOUT_MS          15000UL
-#define BRANCH_CONFIRM_SAMPLES        4U
-#define BRANCH_TURN_MIN_MS            150UL
-#define BRANCH_TURN_MAX_MS            1800UL
-#define CENTER_CONFIRM_SAMPLES        3U
+#define RIGHT_REVERSE_MAX_MS          1000UL
+#define RIGHT_FORWARD_MIN_MS          150UL
+#define TARGET_CONFIRM_SAMPLES        3U
 
 #define SENSOR_POLL_TICKS             1U
+#define SENSOR_STABLE_SAMPLES         2U
 #define CONTROL_POLL_TICKS            2U
 #define MOTOR_REFRESH_MS              200UL
 #define REPORT_INTERVAL_MS            500UL
@@ -41,18 +34,16 @@
 #define TCRT_RIGHT_GPIO               WIFI_IOT_IO_NAME_GPIO_14
 
 /*
- * The black line must stay between the two sensors while the car is centered.
- * Both sensor indicator LEDs should be ON in the centered position. The raw
- * level over black tape must equal LINE_BLACK_LEVEL.
+ * Normal tracking state: the left sensor is over black tape (LED OFF) and the
+ * right sensor is over the white/background area (LED ON). This is right-edge
+ * tracking and does not require white tape and floor to have different levels.
  */
 typedef enum {
-    TRACK_FOLLOW = 0,
-    TRACK_CHECK_MARKER,
-    TRACK_DEAD_END_STOP,
-    TRACK_BACKTRACK,
-    TRACK_BRANCH_TURN,
-    TRACK_FINISHED
-} TrackState;
+    FOLLOW_FORWARD = 0,
+    FOLLOW_CORRECT_LEFT,
+    FOLLOW_REVERSE_RIGHT,
+    FOLLOW_FORWARD_RIGHT
+} FollowAction;
 
 typedef struct {
     WifiIotGpioValue leftRaw;
@@ -61,11 +52,6 @@ typedef struct {
     uint8_t rightBlack;
     uint8_t ready;
 } LineSample;
-
-typedef struct {
-    float integral;
-    float previousError;
-} PidController;
 
 static LineSample g_lineSample;
 static osMutexId_t g_lineMutex;
@@ -146,6 +132,12 @@ static void MotorControl(int leftMotor, int rightMotor)
 static void LineSensorTask(void *argument)
 {
     unsigned long lastReport = 0UL;
+    WifiIotGpioValue candidateLeft = WIFI_IOT_GPIO_VALUE0;
+    WifiIotGpioValue candidateRight = WIFI_IOT_GPIO_VALUE0;
+    WifiIotGpioValue stableLeft = WIFI_IOT_GPIO_VALUE0;
+    WifiIotGpioValue stableRight = WIFI_IOT_GPIO_VALUE0;
+    uint8_t sameSamples = 0U;
+    uint8_t filterReady = 0U;
 
     (void)argument;
     while (1) {
@@ -154,9 +146,22 @@ static void LineSensorTask(void *argument)
 
         GpioGetInputVal(TCRT_LEFT_GPIO, &sample.leftRaw);
         GpioGetInputVal(TCRT_RIGHT_GPIO, &sample.rightRaw);
-        sample.leftBlack = (sample.leftRaw == LINE_BLACK_LEVEL) ? 1U : 0U;
-        sample.rightBlack = (sample.rightRaw == LINE_BLACK_LEVEL) ? 1U : 0U;
-        sample.ready = 1U;
+        if ((sample.leftRaw == candidateLeft) &&
+            (sample.rightRaw == candidateRight)) {
+            if (sameSamples < SENSOR_STABLE_SAMPLES) ++sameSamples;
+        } else {
+            candidateLeft = sample.leftRaw;
+            candidateRight = sample.rightRaw;
+            sameSamples = 1U;
+        }
+        if (sameSamples >= SENSOR_STABLE_SAMPLES) {
+            stableLeft = candidateLeft;
+            stableRight = candidateRight;
+            filterReady = 1U;
+        }
+        sample.leftBlack = (stableLeft == LINE_BLACK_LEVEL) ? 1U : 0U;
+        sample.rightBlack = (stableRight == LINE_BLACK_LEVEL) ? 1U : 0U;
+        sample.ready = filterReady;
 
         osMutexAcquire(g_lineMutex, osWaitForever);
         g_lineSample = sample;
@@ -175,50 +180,34 @@ static void LineSensorTask(void *argument)
     }
 }
 
-static void ResetPid(PidController *pid)
+static void SetFollowingMotors(FollowAction action, int *leftMotor,
+    int *rightMotor)
 {
-    pid->integral = 0.0f;
-    pid->previousError = 0.0f;
-}
-
-static void CalculatePidMotors(PidController *pid, const LineSample *sample,
-    int *leftMotor, int *rightMotor)
-{
-    float error;
-    float correction;
-
-    if ((sample->leftBlack != 0U) && (sample->rightBlack == 0U)) {
-        error = -1.0f;
-    } else if ((sample->rightBlack != 0U) && (sample->leftBlack == 0U)) {
-        error = 1.0f;
+    if (action == FOLLOW_FORWARD) {
+        *leftMotor = NORMAL_LEFT_SPEED;
+        *rightMotor = NORMAL_RIGHT_SPEED;
+    } else if (action == FOLLOW_REVERSE_RIGHT) {
+        *leftMotor = -RIGHT_REVERSE_LEFT_SPEED;
+        *rightMotor = -RIGHT_REVERSE_RIGHT_SPEED;
+    } else if (action == FOLLOW_FORWARD_RIGHT) {
+        *leftMotor = RIGHT_FORWARD_LEFT_SPEED;
+        *rightMotor = RIGHT_FORWARD_RIGHT_SPEED;
     } else {
-        error = 0.0f;
+        *leftMotor = LEFT_CORRECTION_INNER_SPEED;
+        *rightMotor = LEFT_CORRECTION_OUTER_SPEED;
     }
-
-    pid->integral += error;
-    if (pid->integral > PID_INTEGRAL_LIMIT) pid->integral = PID_INTEGRAL_LIMIT;
-    if (pid->integral < -PID_INTEGRAL_LIMIT) pid->integral = -PID_INTEGRAL_LIMIT;
-    correction = PID_KP * error + PID_KI * pid->integral +
-        PID_KD * (error - pid->previousError);
-    pid->previousError = error;
-
-    *leftMotor = ClampMotor(NORMAL_SPEED + (int)correction);
-    *rightMotor = ClampMotor(NORMAL_SPEED - (int)correction);
 }
 
 static void TrackingControlTask(void *argument)
 {
-    TrackState state = TRACK_FOLLOW;
-    PidController pid = {0.0f, 0.0f};
-    unsigned long stateStart = NowMilliseconds();
+    unsigned long actionStart = NowMilliseconds();
     unsigned long lastMotorSend = 0UL;
-    unsigned int secondBarSamples = 0U;
-    unsigned int branchSamples = 0U;
-    unsigned int centeredSamples = 0U;
     int previousLeftMotor = 0;
     int previousRightMotor = 0;
-    int8_t branchDirection = 0;
-    uint8_t markerGapSeen = 0U;
+    FollowAction activeAction = FOLLOW_FORWARD;
+    FollowAction previousAction = FOLLOW_FORWARD;
+    uint8_t actionReady = 0U;
+    uint8_t targetSamples = 0U;
     uint8_t waitingMessagePrinted = 0U;
 
     (void)argument;
@@ -226,140 +215,83 @@ static void TrackingControlTask(void *argument)
     while (1) {
         LineSample sample;
         unsigned long now = NowMilliseconds();
-        unsigned long elapsed = now - stateStart;
+        unsigned long actionElapsed = now - actionStart;
         int leftMotor = 0;
         int rightMotor = 0;
-        uint8_t bothBlack;
-        uint8_t bothWhite;
+        FollowAction action = FOLLOW_FORWARD;
 
         osMutexAcquire(g_lineMutex, osWaitForever);
         sample = g_lineSample;
         osMutexRelease(g_lineMutex);
-        bothBlack = ((sample.leftBlack != 0U) && (sample.rightBlack != 0U));
-        bothWhite = ((sample.leftBlack == 0U) && (sample.rightBlack == 0U));
 
         if (sample.ready == 0U) {
             if (waitingMessagePrinted == 0U) {
                 PrintLine("LINE TRACKING waiting for sensors.\r\n");
                 waitingMessagePrinted = 1U;
             }
-        } else if (state == TRACK_FOLLOW) {
-            if (bothBlack != 0U) {
-                state = TRACK_CHECK_MARKER;
-                stateStart = now;
-                secondBarSamples = 0U;
-                markerGapSeen = 0U;
-                ResetPid(&pid);
-                leftMotor = MARKER_SCAN_SPEED;
-                rightMotor = MARKER_SCAN_SPEED;
-                PrintLine("MARKER possible_end slowing_down.\r\n");
-            } else {
-                CalculatePidMotors(&pid, &sample, &leftMotor, &rightMotor);
-            }
-        } else if (state == TRACK_CHECK_MARKER) {
-            leftMotor = MARKER_SCAN_SPEED;
-            rightMotor = MARKER_SCAN_SPEED;
-            if (bothWhite != 0U) {
-                markerGapSeen = 1U;
-                secondBarSamples = 0U;
-            } else if ((bothBlack == 0U) && (markerGapSeen == 0U)) {
-                state = TRACK_FOLLOW;
-                stateStart = now;
-                CalculatePidMotors(&pid, &sample, &leftMotor, &rightMotor);
-                PrintLine("MARKER cancelled line_correction.\r\n");
-            } else if ((bothBlack != 0U) && (markerGapSeen != 0U) &&
-                (elapsed >= END_GAP_MIN_MS)) {
-                ++secondBarSamples;
-                if (secondBarSamples >= END_BAR_CONFIRM_SAMPLES) {
-                    state = TRACK_FINISHED;
-                    leftMotor = 0;
-                    rightMotor = 0;
-                    PrintLine("FINISH double_bar_detected car_stopped.\r\n");
-                }
-            } else {
-                secondBarSamples = 0U;
-            }
+        } else {
+            uint8_t targetState = ((sample.leftBlack != 0U) &&
+                (sample.rightBlack == 0U)) ? 1U : 0U;
 
-            if ((state == TRACK_CHECK_MARKER) && (elapsed >= END_GAP_MAX_MS)) {
-                state = TRACK_DEAD_END_STOP;
-                stateStart = now;
-                leftMotor = 0;
-                rightMotor = 0;
-                PrintLine("DEAD_END single_bar_detected.\r\n");
-            }
-        } else if (state == TRACK_DEAD_END_STOP) {
-            if (elapsed >= DEAD_END_STOP_MS) {
-                state = TRACK_BACKTRACK;
-                stateStart = now;
-                branchSamples = 0U;
-                branchDirection = 0;
-                PrintLine("DEAD_END action=backtrack.\r\n");
-            }
-        } else if (state == TRACK_BACKTRACK) {
-            leftMotor = -BACKTRACK_SPEED;
-            rightMotor = -BACKTRACK_SPEED;
-            if (elapsed >= BACKTRACK_IGNORE_MS) {
-                if ((sample.leftBlack != 0U) && (sample.rightBlack == 0U)) {
-                    if (branchDirection == -1) {
-                        ++branchSamples;
-                    } else {
-                        branchDirection = -1;
-                        branchSamples = 1U;
-                    }
-                } else if ((sample.rightBlack != 0U) && (sample.leftBlack == 0U)) {
-                    if (branchDirection == 1) {
-                        ++branchSamples;
-                    } else {
-                        branchDirection = 1;
-                        branchSamples = 1U;
+            if (activeAction == FOLLOW_FORWARD) {
+                targetSamples = 0U;
+                if (targetState == 0U) {
+                    activeAction = (sample.rightBlack != 0U) ?
+                        FOLLOW_REVERSE_RIGHT : FOLLOW_CORRECT_LEFT;
+                    actionStart = now;
+                }
+            } else if (activeAction == FOLLOW_CORRECT_LEFT) {
+                if (sample.rightBlack != 0U) {
+                    activeAction = FOLLOW_REVERSE_RIGHT;
+                    actionStart = now;
+                    targetSamples = 0U;
+                } else if (targetState != 0U) {
+                    if (targetSamples < TARGET_CONFIRM_SAMPLES) ++targetSamples;
+                    if (targetSamples >= TARGET_CONFIRM_SAMPLES) {
+                        activeAction = FOLLOW_FORWARD;
+                        actionStart = now;
                     }
                 } else {
-                    branchDirection = 0;
-                    branchSamples = 0U;
+                    targetSamples = 0U;
+                }
+            } else if (activeAction == FOLLOW_REVERSE_RIGHT) {
+                if (targetState != 0U) {
+                    if (targetSamples < TARGET_CONFIRM_SAMPLES) ++targetSamples;
+                } else {
+                    targetSamples = 0U;
+                }
+                if ((targetSamples >= TARGET_CONFIRM_SAMPLES) ||
+                    (actionElapsed >= RIGHT_REVERSE_MAX_MS)) {
+                    activeAction = FOLLOW_FORWARD_RIGHT;
+                    actionStart = now;
+                    targetSamples = 0U;
+                }
+            } else {
+                if (targetState != 0U) {
+                    if (targetSamples < TARGET_CONFIRM_SAMPLES) ++targetSamples;
+                } else {
+                    targetSamples = 0U;
+                }
+                if ((actionElapsed >= RIGHT_FORWARD_MIN_MS) &&
+                    (targetSamples >= TARGET_CONFIRM_SAMPLES)) {
+                    activeAction = FOLLOW_FORWARD;
+                    actionStart = now;
                 }
             }
-
-            if (branchSamples >= BRANCH_CONFIRM_SAMPLES) {
-                state = TRACK_BRANCH_TURN;
-                stateStart = now;
-                centeredSamples = 0U;
-                leftMotor = 0;
-                rightMotor = 0;
-                PrintLine((branchDirection < 0) ?
-                    "JUNCTION detected_side=left.\r\n" :
-                    "JUNCTION detected_side=right.\r\n");
-            } else if (elapsed >= BACKTRACK_TIMEOUT_MS) {
-                state = TRACK_FINISHED;
-                leftMotor = 0;
-                rightMotor = 0;
-                PrintLine("BACKTRACK junction_not_found car_stopped.\r\n");
-            }
-        } else if (state == TRACK_BRANCH_TURN) {
-            if (branchDirection < 0) {
-                leftMotor = -BRANCH_TURN_SPEED;
-                rightMotor = BRANCH_TURN_SPEED;
-            } else {
-                leftMotor = BRANCH_TURN_SPEED;
-                rightMotor = -BRANCH_TURN_SPEED;
-            }
-
-            if ((elapsed >= BRANCH_TURN_MIN_MS) && (bothWhite != 0U)) {
-                ++centeredSamples;
-            } else {
-                centeredSamples = 0U;
-            }
-            if (centeredSamples >= CENTER_CONFIRM_SAMPLES) {
-                state = TRACK_FOLLOW;
-                stateStart = now;
-                ResetPid(&pid);
-                leftMotor = NORMAL_SPEED;
-                rightMotor = NORMAL_SPEED;
-                PrintLine("JUNCTION turn_complete line_centered.\r\n");
-            } else if (elapsed >= BRANCH_TURN_MAX_MS) {
-                state = TRACK_FINISHED;
-                leftMotor = 0;
-                rightMotor = 0;
-                PrintLine("JUNCTION turn_timeout car_stopped.\r\n");
+            action = activeAction;
+            SetFollowingMotors(action, &leftMotor, &rightMotor);
+            if ((actionReady == 0U) || (action != previousAction)) {
+                if (action == FOLLOW_FORWARD) {
+                    PrintLine("TRACK action=forward left_led=off right_led=on.\r\n");
+                } else if (action == FOLLOW_CORRECT_LEFT) {
+                    PrintLine("TRACK action=correct_left waiting_left_led_off.\r\n");
+                } else if (action == FOLLOW_REVERSE_RIGHT) {
+                    PrintLine("TRACK action=reverse_right waiting_left_off_right_on.\r\n");
+                } else {
+                    PrintLine("TRACK action=forward_right waiting_left_off_right_on.\r\n");
+                }
+                previousAction = action;
+                actionReady = 1U;
             }
         }
 
@@ -389,7 +321,7 @@ static void CreateTask(const char *name, osThreadFunc_t entry)
     }
 }
 
-static void PidLineTrackingEntry(void)
+static void EdgeLineTrackingEntry(void)
 {
     g_lineMutex = osMutexNew(NULL);
     g_motorMutex = osMutexNew(NULL);
@@ -402,9 +334,10 @@ static void PidLineTrackingEntry(void)
     ConfigureLineSensors();
     if (InitMotorUart() != 0) return;
     MotorControl(0, 0);
-    PrintLine("LINE TRACKING ready. Put the black line between both sensors.\r\n");
+    PrintLine("LINE TRACKING ready. Put the left sensor over the black line.\r\n");
+    PrintLine("EXPECTED state: left LED off, right LED on.\r\n");
     CreateTask("line_sensor", LineSensorTask);
     CreateTask("line_control", TrackingControlTask);
 }
 
-APP_FEATURE_INIT(PidLineTrackingEntry);
+APP_FEATURE_INIT(EdgeLineTrackingEntry);
